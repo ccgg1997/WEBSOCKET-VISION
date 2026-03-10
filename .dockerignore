@@ -10,5 +10,6 @@ __pycache__
 .idea
 .vscode
 .env
-runtime
-
+runtime/*
+!runtime/.gitkeep
+!runtime/model.pt
