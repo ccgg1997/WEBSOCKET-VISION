@@ -1,0 +1,90 @@
+name: yolo-websocket-inference
+region: nyc
+features:
+  - buildpack-stack=ubuntu-22
+services:
+  - name: websocket-api
+    github:
+      repo: YOUR_GITHUB_USER/YOUR_REPOSITORY
+      branch: main
+      deploy_on_push: true
+    source_dir: /
+    dockerfile_path: Dockerfile
+    http_port: 8000
+    instance_count: 1
+    instance_size_slug: apps-s-1vcpu-1gb
+    health_check:
+      http_path: /healthz
+      initial_delay_seconds: 60
+      period_seconds: 15
+      timeout_seconds: 5
+      success_threshold: 1
+      failure_threshold: 5
+    envs:
+      - key: YOLO_WS_AUTH_USERNAME
+        value: camera-ingenio-01
+        scope: RUN_TIME
+        type: GENERAL
+      - key: YOLO_WS_AUTH_PASSWORD_HASH
+        value: REPLACE_WITH_HASH
+        scope: RUN_TIME
+        type: SECRET
+      - key: YOLO_WS_MODEL_URL
+        value: https://your-space-or-storage.example.com/model.pt
+        scope: RUN_TIME
+        type: SECRET
+      - key: YOLO_WS_MODEL_SHA256
+        value: OPTIONAL_SHA256
+        scope: RUN_TIME
+        type: SECRET
+      - key: YOLO_WS_DEVICE
+        value: auto
+        scope: RUN_TIME
+        type: GENERAL
+      - key: YOLO_WS_DATABASE_URL
+        value: postgresql+psycopg://user:password@db-host:5432/yolo_events
+        scope: RUN_TIME
+        type: SECRET
+      - key: YOLO_WS_STORAGE_BACKEND
+        value: minio
+        scope: RUN_TIME
+        type: GENERAL
+      - key: YOLO_WS_MINIO_ENDPOINT
+        value: minio.example.com:9000
+        scope: RUN_TIME
+        type: SECRET
+      - key: YOLO_WS_MINIO_ACCESS_KEY
+        value: MINIO_ACCESS_KEY
+        scope: RUN_TIME
+        type: SECRET
+      - key: YOLO_WS_MINIO_SECRET_KEY
+        value: MINIO_SECRET_KEY
+        scope: RUN_TIME
+        type: SECRET
+      - key: YOLO_WS_MINIO_BUCKET
+        value: yolo-events
+        scope: RUN_TIME
+        type: GENERAL
+      - key: YOLO_WS_CONF_THRESHOLD
+        value: "0.35"
+        scope: RUN_TIME
+        type: GENERAL
+      - key: YOLO_WS_IOU_THRESHOLD
+        value: "0.45"
+        scope: RUN_TIME
+        type: GENERAL
+      - key: YOLO_WS_IMGSZ
+        value: "640"
+        scope: RUN_TIME
+        type: GENERAL
+      - key: YOLO_WS_TORCH_THREADS
+        value: "2"
+        scope: RUN_TIME
+        type: GENERAL
+ingress:
+  rules:
+    - component:
+        name: websocket-api
+      match:
+        path:
+          prefix: /

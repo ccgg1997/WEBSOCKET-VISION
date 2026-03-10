@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>YOLO WebSocket Client</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f4efe7;
+        --panel: rgba(255, 255, 255, 0.88);
+        --text: #1b1b1b;
+        --muted: #5d584f;
+        --accent: #d6643b;
+        --line: rgba(27, 27, 27, 0.1);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "Segoe UI", sans-serif;
+        background:
+          radial-gradient(circle at top left, rgba(214, 100, 59, 0.18), transparent 32%),
+          linear-gradient(180deg, #f5efe5 0%, #e7dccb 100%);
+        color: var(--text);
+      }
+
+      main {
+        max-width: 980px;
+        margin: 0 auto;
+        padding: 24px;
+        display: grid;
+        gap: 20px;
+      }
+
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        padding: 18px;
+        box-shadow: 0 20px 40px rgba(0, 0, 0, 0.08);
+      }
+
+      h1 {
+        margin: 0 0 6px;
+        font-size: 32px;
+      }
+
+      p,
+      label,
+      li,
+      button,
+      input,
+      pre {
+        font-size: 15px;
+      }
+
+      .grid {
+        display: grid;
+        gap: 12px;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      }
+
+      label {
+        display: grid;
+        gap: 6px;
+        color: var(--muted);
+      }
+
+      input {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 10px 12px;
+        background: white;
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 12px;
+      }
+
+      button {
+        border: 0;
+        border-radius: 999px;
+        padding: 10px 18px;
+        cursor: pointer;
+        background: #1f1f1f;
+        color: white;
+      }
+
+      button.secondary {
+        background: white;
+        color: #1f1f1f;
+        border: 1px solid var(--line);
+      }
+
+      video {
+        width: 100%;
+        border-radius: 16px;
+        background: #111;
+        aspect-ratio: 16 / 9;
+        object-fit: cover;
+      }
+
+      .status {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 8px 12px;
+        border-radius: 999px;
+        background: rgba(214, 100, 59, 0.12);
+        color: #8e3f20;
+      }
+
+      pre {
+        white-space: pre-wrap;
+        background: #111;
+        color: #f7f3ee;
+        border-radius: 16px;
+        padding: 16px;
+        overflow: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="panel">
+        <h1>YOLO WebSocket Client</h1>
+        <p>Abre la camara del celular o navegador, autentica y envia frames JPEG al servicio.</p>
+      </section>
+
+      <section class="panel">
+        <div class="grid">
+          <label>
+            WebSocket URL
+            <input id="wsUrl" value="ws://localhost:8000/ws/infer" />
+          </label>
+          <label>
+            Usuario
+            <input id="username" value="camera-ingenio-01" />
+          </label>
+          <label>
+            Contrasena
+            <input id="password" type="password" value="secret123" />
+          </label>
+          <label>
+            Intervalo ms
+            <input id="intervalMs" type="number" value="500" min="100" />
+          </label>
+          <label>
+            Calidad JPEG
+            <input id="jpegQuality" type="number" value="0.8" min="0.1" max="1" step="0.1" />
+          </label>
+        </div>
+        <div class="actions">
+          <button id="connectBtn">Conectar y transmitir</button>
+          <button id="stopBtn" class="secondary">Detener</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="status">
+          <span class="pill" id="state">desconectado</span>
+          <span class="pill" id="model">modelo: -</span>
+          <span class="pill" id="stats">detecciones: 0</span>
+        </div>
+      </section>
+
+      <section class="panel">
+        <video id="video" autoplay playsinline muted></video>
+      </section>
+
+      <section class="panel">
+        <pre id="output">Sin actividad.</pre>
+      </section>
+    </main>
+
+    <script>
+      const wsUrlInput = document.getElementById("wsUrl");
+      const usernameInput = document.getElementById("username");
+      const passwordInput = document.getElementById("password");
+      const intervalInput = document.getElementById("intervalMs");
+      const jpegQualityInput = document.getElementById("jpegQuality");
+      const connectBtn = document.getElementById("connectBtn");
+      const stopBtn = document.getElementById("stopBtn");
+      const video = document.getElementById("video");
+      const stateEl = document.getElementById("state");
+      const modelEl = document.getElementById("model");
+      const statsEl = document.getElementById("stats");
+      const output = document.getElementById("output");
+
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d");
+
+      let socket = null;
+      let stream = null;
+      let timer = null;
+
+      function setState(text) {
+        stateEl.textContent = text;
+      }
+
+      function log(payload) {
+        output.textContent = typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
+      }
+
+      async function startCamera() {
+        if (stream) {
+          return;
+        }
+
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: "environment" },
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          },
+          audio: false
+        });
+        video.srcObject = stream;
+        await video.play();
+      }
+
+      function stopCamera() {
+        if (!stream) {
+          return;
+        }
+        stream.getTracks().forEach((track) => track.stop());
+        stream = null;
+      }
+
+      function stopStreaming() {
+        if (timer) {
+          clearInterval(timer);
+          timer = null;
+        }
+        if (socket) {
+          socket.close();
+          socket = null;
+        }
+        stopCamera();
+        setState("desconectado");
+      }
+
+      async function captureAndSend() {
+        if (!socket || socket.readyState !== WebSocket.OPEN || !video.videoWidth) {
+          return;
+        }
+
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+        const quality = Number(jpegQualityInput.value || 0.8);
+        const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", quality));
+        if (!blob) {
+          return;
+        }
+
+        const buffer = await blob.arrayBuffer();
+        socket.send(buffer);
+      }
+
+      async function connect() {
+        try {
+          await startCamera();
+          setState("conectando");
+
+          socket = new WebSocket(wsUrlInput.value.trim());
+          socket.binaryType = "arraybuffer";
+
+          socket.onmessage = (event) => {
+            const payload = JSON.parse(event.data);
+            log(payload);
+
+            if (payload.type === "hello") {
+              socket.send(JSON.stringify({
+                type: "auth",
+                username: usernameInput.value.trim(),
+                password: passwordInput.value
+              }));
+              return;
+            }
+
+            if (payload.type === "auth_ok") {
+              setState("autenticado");
+              modelEl.textContent = `modelo: ${payload.model.name} (${payload.model.device})`;
+              const intervalMs = Number(intervalInput.value || 500);
+              timer = setInterval(captureAndSend, intervalMs);
+              return;
+            }
+
+            if (payload.type === "inference") {
+              statsEl.textContent = `detecciones: ${payload.counts.total} | latencia: ${payload.latency_ms} ms`;
+              return;
+            }
+
+            if (payload.type === "error") {
+              setState(`error: ${payload.code}`);
+            }
+          };
+
+          socket.onopen = () => {
+            setState("socket abierto");
+          };
+
+          socket.onerror = () => {
+            setState("error de websocket");
+          };
+
+          socket.onclose = () => {
+            if (timer) {
+              clearInterval(timer);
+              timer = null;
+            }
+            setState("conexion cerrada");
+          };
+        } catch (error) {
+          log({ error: String(error) });
+          setState("fallo al iniciar");
+        }
+      }
+
+      connectBtn.addEventListener("click", connect);
+      stopBtn.addEventListener("click", stopStreaming);
+    </script>
+  </body>
+</html>
+

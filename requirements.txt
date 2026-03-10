@@ -1,0 +1,8 @@
+fastapi==0.129.0
+minio>=7.2,<8
+opencv-python-headless==4.13.0.92
+psycopg[binary]>=3.2,<4
+python-dotenv==1.2.1
+SQLAlchemy>=2.0,<3
+ultralytics==8.4.14
+uvicorn[standard]==0.41.0
