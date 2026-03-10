@@ -14,7 +14,7 @@ python hash_password.py --password "tu-clave"
 5. levanta el stack:
 
 ```bash
-docker compose up -d --build
+docker compose -f docker-compose.yml up -d --build
 ```
 
 Servicios segun los puertos que definas en `.env`:

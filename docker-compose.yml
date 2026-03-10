@@ -1,7 +1,6 @@
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: yolo-websocket-postgres
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
@@ -9,8 +8,6 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - postgres-data:/var/lib/postgresql/data
-    ports:
-      - "${POSTGRES_PORT}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
@@ -20,17 +17,13 @@ services:
 
   minio:
     image: minio/minio:latest
-    container_name: yolo-websocket-minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
     volumes:
       - minio-data:/data
-    ports:
-      - "${MINIO_API_PORT}:9000"
-      - "${MINIO_CONSOLE_PORT}:9001"
     healthcheck:
       test: ["CMD-SHELL", "echo >/dev/tcp/127.0.0.1/9000"]
       interval: 10s
@@ -42,13 +35,16 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: yolo-websocket-api
     restart: unless-stopped
     env_file:
       - .env
     environment:
       PORT: "8000"
       YOLO_WS_PORT: "8000"
+      YOLO_WS_MINIO_ACCESS_KEY: minioadmin
+      YOLO_WS_MINIO_SECRET_KEY: minioadmin
+      YOLO_WS_MINIO_BUCKET: invoice-route-evidence
+      YOLO_WS_MINIO_PREFIX: invoice-route-app/yolo-websocket-demo
     depends_on:
       postgres:
         condition: service_healthy
@@ -56,11 +52,6 @@ services:
         condition: service_healthy
     volumes:
       - ./runtime:/app/runtime
-    ports:
-      - "8000:8000"
-    networks:
-      - default
-      - invoice-route-app_app_network
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3).read()"]
       interval: 15s
@@ -72,7 +63,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: yolo-websocket-monitor
     depends_on:
       websocket-api:
         condition: service_healthy
@@ -87,10 +77,6 @@ services:
       - default
     healthcheck:
       disable: true
-
-networks:
-  invoice-route-app_app_network:
-    external: true
 
 volumes:
   postgres-data:

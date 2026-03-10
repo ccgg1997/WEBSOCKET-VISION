@@ -131,8 +131,10 @@ Por defecto:
 
 ## Docker Compose
 
-- `docker-compose.yml`: stack local principal. Levanta `postgres`, `minio` y
-  `websocket-api`, dejando el WebSocket expuesto en `http://localhost:8000`.
+- `docker-compose.yml`: base limpia para despliegue. Levanta `postgres`,
+  `minio` y `websocket-api` sin fijar `container_name` ni `ports`.
+- `docker-compose.override.yml`: override local automatico. Expone puertos,
+  fija nombres de contenedor y conecta la red externa local si existe.
 
 ## Variables importantes
 

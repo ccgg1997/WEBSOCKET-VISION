@@ -1,0 +1,28 @@
+services:
+  postgres:
+    container_name: yolo-websocket-postgres
+    ports:
+      - "${POSTGRES_PORT}:5432"
+
+  minio:
+    container_name: yolo-websocket-minio
+    ports:
+      - "${MINIO_API_PORT}:9000"
+      - "${MINIO_CONSOLE_PORT}:9001"
+
+  websocket-api:
+    container_name: yolo-websocket-api
+    ports:
+      - "8000:8000"
+    networks:
+      - default
+      - invoice-route-app_app_network
+
+  websocket-monitor:
+    container_name: yolo-websocket-monitor
+    networks:
+      - default
+
+networks:
+  invoice-route-app_app_network:
+    external: true
