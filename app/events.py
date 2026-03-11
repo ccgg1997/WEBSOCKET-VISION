@@ -226,6 +226,15 @@ class SessionEventRecorder:
                 f"confianza: {confidence}%",
             ]
         )
+        LOGGER.info(
+            "Telegram fill alert queued: source=%s connection=%s model=%s fill=%s label=%s confidence=%s",
+            self._source_id,
+            self._connection_id,
+            self._model_id,
+            fill_percent,
+            label,
+            confidence,
+        )
         self._telegram_notifier.notify_text(message)
 
     def _build_object_key(self, event_id: str, filename: str) -> str:
@@ -573,11 +582,24 @@ class EventManager:
         self._temp_dir.mkdir(parents=True, exist_ok=True)
         self._telegram_notifier: TelegramNotifier | None = None
         if settings.telegram_enabled:
+            masked_chat_id = (
+                settings.telegram_chat_id[-4:]
+                if len(settings.telegram_chat_id) >= 4
+                else settings.telegram_chat_id
+            )
+            LOGGER.info(
+                "Telegram alerts enabled: models=%s threshold=%s chat_id=***%s",
+                settings.telegram_model_ids,
+                settings.telegram_fill_threshold,
+                masked_chat_id,
+            )
             self._telegram_notifier = TelegramNotifier(
                 bot_token=settings.telegram_bot_token,
                 chat_id=settings.telegram_chat_id,
                 timeout_seconds=settings.telegram_timeout_seconds,
             )
+        else:
+            LOGGER.info("Telegram alerts disabled.")
         self._recorders: dict[str, SessionEventRecorder] = {}
         self._lock = threading.Lock()
 

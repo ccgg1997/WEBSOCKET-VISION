@@ -297,7 +297,13 @@ def create_app() -> FastAPI:
             model_device=runtime.device,
         )
 
-        LOGGER.info("Session opened: %s", session_id)
+        LOGGER.info(
+            "Session opened: session=%s connection=%s source=%s model=%s",
+            session_id,
+            connection_id,
+            source_id,
+            model_id,
+        )
 
         try:
             while True:
