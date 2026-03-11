@@ -66,5 +66,21 @@ class TelegramNotifier:
                 timeout=self._timeout_seconds,
             ) as response:
                 response.read()
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace").strip()
+            description = body
+            if body:
+                try:
+                    response_payload = json.loads(body)
+                except json.JSONDecodeError:
+                    response_payload = None
+                if isinstance(response_payload, dict):
+                    description = str(response_payload.get("description") or body)
+            LOGGER.error(
+                "Telegram notification failed: status=%s reason=%s detail=%s",
+                exc.code,
+                exc.reason,
+                description,
+            )
         except urllib.error.URLError as exc:
             LOGGER.error("Telegram notification failed: %s", exc)
