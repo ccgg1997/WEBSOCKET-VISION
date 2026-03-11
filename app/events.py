@@ -226,7 +226,7 @@ class SessionEventRecorder:
         active: ActiveEvent,
         *,
         preview_bytes: bytes,
-        clip_url: str,
+        clip_bytes: bytes,
     ) -> None:
         if self._telegram_notifier is None or not active.notify_telegram:
             return
@@ -244,23 +244,21 @@ class SessionEventRecorder:
                 f"confianza: {confidence}%",
             ]
         )
-        message = "\n".join(
+        video_caption = "\n".join(
             [
                 "VIDEO EVENTO CANA",
                 f"camara: {source_line}",
                 f"conexion: {self._connection_id}",
                 f"modelo: {self._model_id}",
                 f"llenado: {active.trigger_percent}%",
-                f"video: {clip_url}",
             ]
         )
         LOGGER.info(
-            "Telegram fill event media queued: source=%s connection=%s model=%s fill=%s clip=%s",
+            "Telegram fill event media queued: source=%s connection=%s model=%s fill=%s",
             self._source_id,
             self._connection_id,
             self._model_id,
             active.trigger_percent,
-            clip_url,
         )
         if preview_bytes:
             self._telegram_notifier.notify_photo(
@@ -275,7 +273,19 @@ class SessionEventRecorder:
                 self._connection_id,
                 active.event_id,
             )
-        self._telegram_notifier.notify_text(message)
+        if clip_bytes:
+            self._telegram_notifier.notify_video(
+                video_bytes=clip_bytes,
+                filename=f"{active.file_stem}_clip.mp4",
+                caption=video_caption,
+            )
+        else:
+            LOGGER.warning(
+                "Telegram fill event clip is empty: source=%s connection=%s event=%s",
+                self._source_id,
+                self._connection_id,
+                active.event_id,
+            )
 
     def _build_object_key(
         self,
@@ -379,17 +389,6 @@ class SessionEventRecorder:
         ended_at = utc_now_iso()
         preview_filename = f"{active.file_stem}_snapshot.jpg"
         clip_filename = f"{active.file_stem}_clip.mp4"
-        preview_bytes = b""
-        if active.notify_telegram and self._telegram_notifier is not None:
-            try:
-                preview_bytes = active.preview_temp_path.read_bytes()
-            except OSError as exc:
-                LOGGER.error(
-                    "Could not read preview image for Telegram: source=%s event=%s error=%s",
-                    self._source_id,
-                    active.event_id,
-                    exc,
-                )
 
         preview_object = self._storage.upload_file(
             local_path=active.preview_temp_path,
@@ -458,11 +457,31 @@ class SessionEventRecorder:
             "annotation": record["annotation"],
         }
 
+        preview_bytes = b""
+        clip_bytes = b""
         if active.notify_telegram:
+            try:
+                preview_bytes = active.preview_temp_path.read_bytes()
+            except OSError as exc:
+                LOGGER.error(
+                    "Could not read preview image for Telegram: source=%s event=%s error=%s",
+                    self._source_id,
+                    active.event_id,
+                    exc,
+                )
+            try:
+                clip_bytes = active.clip_temp_path.read_bytes()
+            except OSError as exc:
+                LOGGER.error(
+                    "Could not read clip video for Telegram: source=%s event=%s error=%s",
+                    self._source_id,
+                    active.event_id,
+                    exc,
+                )
             self._queue_fill_event_notification(
                 active,
                 preview_bytes=preview_bytes,
-                clip_url=event_payload["clip_url"],
+                clip_bytes=clip_bytes,
             )
 
         active.preview_temp_path.unlink(missing_ok=True)

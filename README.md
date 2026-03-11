@@ -185,7 +185,7 @@ de eventos para guardar:
 - una imagen anotada
 - 5 segundos de clip
 - ambos bajo el prefijo `YOLO_WS_FILL_EVENT_STORAGE_PREFIX` en MinIO
-- y al cerrar el evento envia por Telegram la foto anotada y el link firmado del video
+- y al cerrar el evento envia por Telegram la foto anotada y el video directamente
 
 Por defecto:
 
