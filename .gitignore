@@ -9,4 +9,4 @@ __pycache__/
 runtime/*
 !runtime/.gitkeep
 !runtime/model.pt
-!runtime/caña.pt
+!runtime/cana.pt
