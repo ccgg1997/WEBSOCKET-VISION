@@ -63,6 +63,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    profiles:
+      - debug
     depends_on:
       websocket-api:
         condition: service_healthy
