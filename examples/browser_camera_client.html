@@ -70,7 +70,8 @@
         color: var(--muted);
       }
 
-      input {
+      input,
+      select {
         width: 100%;
         border: 1px solid var(--line);
         border-radius: 12px;
@@ -157,6 +158,20 @@
             <input id="password" type="password" value="secret123" />
           </label>
           <label>
+            Source ID
+            <input id="sourceId" value="camara1" />
+          </label>
+          <label>
+            Source Name
+            <input id="sourceName" value="Camara 1" />
+          </label>
+          <label>
+            Modelo
+            <select id="modelId">
+              <option value="default">default</option>
+            </select>
+          </label>
+          <label>
             Intervalo ms
             <input id="intervalMs" type="number" value="500" min="100" />
           </label>
@@ -174,6 +189,7 @@
       <section class="panel">
         <div class="status">
           <span class="pill" id="state">desconectado</span>
+          <span class="pill" id="connection">conexion: -</span>
           <span class="pill" id="model">modelo: -</span>
           <span class="pill" id="stats">detecciones: 0</span>
         </div>
@@ -192,12 +208,16 @@
       const wsUrlInput = document.getElementById("wsUrl");
       const usernameInput = document.getElementById("username");
       const passwordInput = document.getElementById("password");
+      const sourceIdInput = document.getElementById("sourceId");
+      const sourceNameInput = document.getElementById("sourceName");
+      const modelInput = document.getElementById("modelId");
       const intervalInput = document.getElementById("intervalMs");
       const jpegQualityInput = document.getElementById("jpegQuality");
       const connectBtn = document.getElementById("connectBtn");
       const stopBtn = document.getElementById("stopBtn");
       const video = document.getElementById("video");
       const stateEl = document.getElementById("state");
+      const connectionEl = document.getElementById("connection");
       const modelEl = document.getElementById("model");
       const statsEl = document.getElementById("stats");
       const output = document.getElementById("output");
@@ -208,6 +228,32 @@
       let socket = null;
       let stream = null;
       let timer = null;
+
+      function populateModelOptions(models, defaultModelId) {
+        const previous = modelInput.value;
+        modelInput.innerHTML = "";
+
+        if (!Array.isArray(models) || models.length === 0) {
+          const option = document.createElement("option");
+          option.value = "default";
+          option.textContent = "default";
+          modelInput.appendChild(option);
+          modelInput.value = "default";
+          return;
+        }
+
+        models.forEach((model) => {
+          const option = document.createElement("option");
+          option.value = model.id;
+          option.textContent = `${model.name} (${model.id})`;
+          modelInput.appendChild(option);
+        });
+
+        modelInput.value = previous || defaultModelId || models[0].id;
+        if (!modelInput.value) {
+          modelInput.value = defaultModelId || models[0].id;
+        }
+      }
 
       function setState(text) {
         stateEl.textContent = text;
@@ -253,6 +299,7 @@
         }
         stopCamera();
         setState("desconectado");
+        connectionEl.textContent = "conexion: -";
       }
 
       async function captureAndSend() {
@@ -287,17 +334,23 @@
             log(payload);
 
             if (payload.type === "hello") {
+              populateModelOptions(payload.available_models, payload.default_model_id);
               socket.send(JSON.stringify({
                 type: "auth",
                 username: usernameInput.value.trim(),
-                password: passwordInput.value
+                password: passwordInput.value,
+                source_id: sourceIdInput.value.trim(),
+                source_name: sourceNameInput.value.trim(),
+                model_id: modelInput.value
               }));
               return;
             }
 
             if (payload.type === "auth_ok") {
               setState("autenticado");
-              modelEl.textContent = `modelo: ${payload.model.name} (${payload.model.device})`;
+              connectionEl.textContent = `conexion: ${payload.connection_id}`;
+              populateModelOptions(payload.available_models, payload.default_model_id);
+              modelEl.textContent = `modelo: ${payload.model.name} (${payload.model.id} | ${payload.model.device})`;
               const intervalMs = Number(intervalInput.value || 500);
               timer = setInterval(captureAndSend, intervalMs);
               return;
@@ -339,4 +392,3 @@
     </script>
   </body>
 </html>
-

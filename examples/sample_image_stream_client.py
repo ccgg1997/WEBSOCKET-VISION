@@ -17,6 +17,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--url", type=str, required=True)
     parser.add_argument("--username", type=str, required=True)
     parser.add_argument("--password", type=str, required=True)
+    parser.add_argument(
+        "--model-id",
+        type=str,
+        default="",
+        help="Modelo a usar en el backend, por ejemplo default o cana.",
+    )
     parser.add_argument("--source-id", type=str, default="sample-image-01")
     parser.add_argument("--source-name", type=str, default="Sample Image Stream")
     parser.add_argument(
@@ -62,27 +68,30 @@ async def main() -> None:
         hello = json.loads(await websocket.recv())
         print(f"[hello] {hello}")
 
+        auth_payload = {
+            "type": "auth",
+            "username": args.username,
+            "password": args.password,
+            "source_id": args.source_id,
+            "source_type": "sample-image",
+            "source_name": args.source_name,
+            "source_metadata": {
+                "image_url": args.image_url,
+                "image_path": args.image_path,
+            },
+        }
+        if args.model_id.strip():
+            auth_payload["model_id"] = args.model_id.strip()
+
         await websocket.send(
-            json.dumps(
-                {
-                    "type": "auth",
-                    "username": args.username,
-                    "password": args.password,
-                    "source_id": args.source_id,
-                    "source_type": "sample-image",
-                    "source_name": args.source_name,
-                    "source_metadata": {
-                        "image_url": args.image_url,
-                        "image_path": args.image_path,
-                    },
-                }
-            )
+            json.dumps(auth_payload)
         )
 
         auth_response = json.loads(await websocket.recv())
         if auth_response.get("type") != "auth_ok":
             raise RuntimeError(f"Autenticacion fallida: {auth_response}")
         print(f"[auth] {auth_response}")
+        print(f"[auth] conexion corta: {auth_response.get('connection_id')}")
 
         while args.frame_count <= 0 or sent < args.frame_count:
             started = perf_counter()

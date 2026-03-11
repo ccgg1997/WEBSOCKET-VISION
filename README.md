@@ -31,6 +31,17 @@ Ruta:
 /ws/infer
 ```
 
+El backend puede publicar uno o varios modelos sobre el mismo socket.
+La seleccion recomendada es por `model_id` en el mensaje `auth`.
+No hace falta exponer un endpoint distinto por modelo salvo que quieras
+aislar despliegue, costos o escalado.
+
+Compatibilidad actual con `vision-app`:
+
+- esa web envia `model`, `model_id`, `model_selection` y `requested_model`
+- normalmente manda `"1"` para el modelo general y `"2"` para el modelo de llenado
+- este backend ya acepta esos campos y puede mapearlos con `YOLO_WS_MODEL_SELECTION_ALIASES`
+
 ### 1. Mensaje de autenticacion
 
 El primer mensaje debe ser JSON:
@@ -39,7 +50,35 @@ El primer mensaje debe ser JSON:
 {
   "type": "auth",
   "username": "camera-ingenio-01",
-  "password": "tu-clave"
+  "password": "tu-clave",
+  "source_id": "camara1",
+  "source_name": "Camara 1",
+  "model_id": "cana"
+}
+```
+
+Antes del `auth`, el servidor manda un `hello` con los modelos disponibles:
+
+```json
+{
+  "type": "hello",
+  "protocol": "yolo-ws-v1",
+  "message": "Send auth message first.",
+  "default_model_id": "default",
+  "available_models": [
+    {
+      "id": "default",
+      "name": "Modelo General",
+      "file_name": "model.pt",
+      "device": "cpu"
+    },
+    {
+      "id": "cana",
+      "name": "Modelo Cana",
+      "file_name": "cana.pt",
+      "device": "cpu"
+    }
+  ]
 }
 ```
 
@@ -49,15 +88,29 @@ Respuesta exitosa:
 {
   "type": "auth_ok",
   "session_id": "4f779adf7f5448c5a68f10ae8c651e80",
+  "connection_id": "4f779adf",
   "source_id": "dvr-canal-1",
   "source_type": "rtsp",
   "source_name": "DVR Canal 1",
   "model": {
-    "name": "model.pt",
+    "id": "cana",
+    "name": "Modelo Cana",
+    "file_name": "cana.pt",
     "device": "cpu"
-  }
+  },
+  "default_model_id": "default"
 }
 ```
+
+Si quieres cambiar de modelo desde la web, la forma mas limpia es cerrar
+esa conexion y abrir otra con otro `model_id`. Asi cada sesion queda
+registrada con su modelo real.
+
+Para distinguir varias conexiones al mismo tiempo:
+
+- usa un `source_id` estable por camara, por ejemplo `camara1`, `camara2`, `patio-norte`
+- usa `source_name` para un nombre legible
+- el backend tambien devuelve `connection_id`, un identificador corto por sesion
 
 ### 2. Envio de frames
 
@@ -106,6 +159,7 @@ Tambien puedes enviar JSON si el cliente no maneja binarios:
 Mensajes auxiliares:
 
 - `{"type":"ping"}` -> `{"type":"pong"}`
+- `GET /models` -> lista los modelos disponibles y el `default_model_id`
 
 ## Flujo de evento real
 
@@ -120,6 +174,9 @@ El servicio ya soporta este flujo:
    - un registro en PostgreSQL
    - snapshots periodicos de estado
    - URLs firmadas temporales al consultar eventos
+
+El upload a MinIO ocurre cuando el evento se cierra y se persiste dentro de
+`app/events.py`, en la rutina `_finalize_event`.
 
 Por defecto:
 
@@ -141,9 +198,17 @@ Por defecto:
 - `YOLO_WS_AUTH_USERNAME`: usuario permitido.
 - `YOLO_WS_AUTH_PASSWORD_HASH`: hash PBKDF2 recomendado.
 - `YOLO_WS_AUTH_PASSWORD`: solo para pruebas rapidas.
+- `YOLO_WS_DEFAULT_MODEL_ID`: modelo por defecto del socket.
 - `YOLO_WS_MODEL_PATH`: ruta local al `.pt`, relativa a esta misma carpeta.
+- `YOLO_WS_MODEL_NAME`: nombre visible del modelo unico por compatibilidad.
 - `YOLO_WS_MODEL_URL`: URL para descargar el modelo si no existe en disco.
 - `YOLO_WS_MODEL_SHA256`: checksum opcional para validar la descarga.
+- `YOLO_WS_MODEL_IDS`: activa modo multi-modelo, por ejemplo `default,cana`.
+- `YOLO_WS_MODEL_<ID>_PATH`: ruta local del modelo `ID`.
+- `YOLO_WS_MODEL_<ID>_URL`: URL opcional para descargar el modelo `ID`.
+- `YOLO_WS_MODEL_<ID>_SHA256`: checksum opcional del modelo `ID`.
+- `YOLO_WS_MODEL_<ID>_NAME`: nombre visible del modelo `ID` para UI.
+- `YOLO_WS_MODEL_SELECTION_ALIASES`: aliases del selector que llega desde clientes externos, por ejemplo `1:default,2:cana`.
 - `PORT`: puerto de DigitalOcean/App Platform.
 - `YOLO_WS_TRIGGER_LABELS`: labels que disparan evento.
 - `YOLO_WS_CLIP_SECONDS`: segundos de video que se guardan.
@@ -151,6 +216,11 @@ Por defecto:
 - `YOLO_WS_DB_PATH`: fallback local para desarrollo si no defines `YOLO_WS_DATABASE_URL`.
 - `YOLO_WS_SNAPSHOT_INTERVAL_SECONDS`: cada cuantos segundos guardar resumen.
 - `YOLO_WS_SNAPSHOT_SAVE_EMPTY`: si guarda snapshots aun sin detecciones.
+- `YOLO_WS_TELEGRAM_ENABLED`: activa alertas por Telegram.
+- `YOLO_WS_TELEGRAM_BOT_TOKEN`: token del bot.
+- `YOLO_WS_TELEGRAM_CHAT_ID`: chat destino.
+- `YOLO_WS_TELEGRAM_MODEL_IDS`: modelos que disparan esta logica, por ejemplo `cana`.
+- `YOLO_WS_TELEGRAM_FILL_THRESHOLD`: umbral estricto de llenado. Si el porcentaje detectado es mayor a este valor, envia alerta.
 - `YOLO_WS_STORAGE_BACKEND`: `minio` o `local`.
 - `YOLO_WS_MINIO_*`: credenciales y bucket del object storage.
 - `YOLO_WS_PRESIGNED_URL_EXPIRY_SECONDS`: vigencia de las URLs firmadas.
@@ -203,6 +273,28 @@ YOLO_WS_STORAGE_BACKEND=local
 YOLO_WS_DB_PATH=runtime/service.db
 ```
 
+Ejemplo multi-modelo:
+
+```env
+YOLO_WS_DEFAULT_MODEL_ID=default
+YOLO_WS_MODEL_IDS=default,cana
+YOLO_WS_MODEL_DEFAULT_NAME=Modelo General
+YOLO_WS_MODEL_DEFAULT_PATH=runtime/model.pt
+YOLO_WS_MODEL_CANA_NAME=Modelo Cana
+YOLO_WS_MODEL_CANA_PATH=runtime/cana.pt
+YOLO_WS_MODEL_SELECTION_ALIASES=1:default,2:cana
+```
+
+Ejemplo con alerta Telegram para `cana`:
+
+```env
+YOLO_WS_TELEGRAM_ENABLED=true
+YOLO_WS_TELEGRAM_MODEL_IDS=cana
+YOLO_WS_TELEGRAM_FILL_THRESHOLD=50
+YOLO_WS_TELEGRAM_BOT_TOKEN=...
+YOLO_WS_TELEGRAM_CHAT_ID=...
+```
+
 ## Consumir el servicio
 
 ### Cliente Python con camara
@@ -220,6 +312,7 @@ python examples/python_camera_client.py ^
   --url ws://localhost:8000/ws/infer ^
   --username camera-ingenio-01 ^
   --password tu-clave ^
+  --model-id cana ^
   --source-id camera-local-01 ^
   --source-name "Camara Local" ^
   --camera 0 ^
@@ -230,6 +323,10 @@ python examples/python_camera_client.py ^
 ### Cliente navegador o celular
 
 Abre `examples/browser_camera_client.html`.
+
+Ese ejemplo ya carga la lista de modelos desde `hello` y manda el
+`model_id` seleccionado en `auth`.
+Tambien permite mandar `source_id` y `source_name` para identificar la camara.
 
 Notas:
 
@@ -253,6 +350,7 @@ python examples/rtsp_video_bridge.py ^
   --url ws://localhost:8000/ws/infer ^
   --username camera-ingenio-01 ^
   --password tu-clave ^
+  --model-id cana ^
   --source "rtsp://usuario:clave@IP:554/Streaming/Channels/101" ^
   --source-id dvr-canal-1 ^
   --source-name "DVR Canal 1"
@@ -265,6 +363,7 @@ python examples/rtsp_video_bridge.py ^
   --url ws://localhost:8000/ws/infer ^
   --username camera-ingenio-01 ^
   --password tu-clave ^
+  --model-id cana ^
   --source "C:\\videos\\prueba.mp4" ^
   --source-id video-prueba ^
   --source-name "Video de Prueba"
@@ -338,6 +437,7 @@ Asi la imagen queda pequena y no dependes de subir el modelo dentro del repo.
 
 - Usa `wss://` en produccion, terminando TLS en Nginx, Caddy o el balanceador de DigitalOcean.
 - Manten una sola replica por contenedor si usas CPU, para no cargar varias veces el modelo.
+- Si vas a cargar muchos modelos pesados, separar por servicio puede ser mejor que tenerlos todos en memoria.
 - Si conectas varias camaras, escala horizontalmente en vez de subir workers de Uvicorn.
 - Puedes consultar la base operativa con `GET /db/stats`, `GET /sources`, `GET /sessions`, `GET /snapshots` y `GET /events`.
 - `GET /events` devuelve `clip_url` y `preview_url` como `presigned URL` cuando el backend es MinIO.

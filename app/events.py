@@ -17,6 +17,7 @@ import numpy as np
 from app.config import ServiceSettings
 from app.database import DatabaseSettings, ServiceRepository
 from app.inference import draw_detections
+from app.notifications import TelegramNotifier
 from app.storage import ObjectStorage, create_storage
 
 
@@ -85,20 +86,26 @@ class SessionEventRecorder:
         storage: ObjectStorage,
         temp_dir: Path,
         session_id: str,
+        connection_id: str,
         source_id: str,
         source_type: str,
         source_name: str,
         source_metadata: dict[str, Any],
+        model_id: str,
+        telegram_notifier: TelegramNotifier | None,
     ) -> None:
         self._settings = settings
         self._repository = repository
         self._storage = storage
         self._temp_dir = temp_dir
         self._session_id = session_id
+        self._connection_id = connection_id
         self._source_id = source_id
         self._source_type = source_type
         self._source_name = source_name
         self._source_metadata = source_metadata
+        self._model_id = model_id
+        self._telegram_notifier = telegram_notifier
         self._frame_times: deque[float] = deque(maxlen=30)
         self._active_event: ActiveEvent | None = None
         self._last_event_at = 0.0
@@ -108,6 +115,7 @@ class SessionEventRecorder:
         self._event_count = 0
         self._latency_total_ms = 0.0
         self._last_inference_at: str | None = None
+        self._telegram_alert_active = False
 
     @property
     def source_id(self) -> str:
@@ -165,6 +173,60 @@ class SessionEventRecorder:
         if not matches:
             return None
         return max(matches, key=lambda detection: float(detection.get("confidence", 0.0)))
+
+    def _resolve_fill_level(
+        self,
+        detections: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any] | None, int]:
+        best_detection: dict[str, Any] | None = None
+        best_percent = 0
+        for detection in detections:
+            percent = label_to_percent(
+                str(detection.get("label", "")),
+                self._settings.label_percent_aliases,
+            )
+            if percent > best_percent:
+                best_detection = detection
+                best_percent = percent
+        return best_detection, best_percent
+
+    def _maybe_send_telegram_fill_alert(
+        self,
+        detections: list[dict[str, Any]],
+    ) -> None:
+        if self._telegram_notifier is None:
+            return
+        if self._model_id not in self._settings.telegram_model_ids:
+            return
+
+        best_detection, fill_percent = self._resolve_fill_level(detections)
+        if best_detection is None or fill_percent <= self._settings.telegram_fill_threshold:
+            self._telegram_alert_active = False
+            return
+
+        if self._telegram_alert_active:
+            return
+
+        self._telegram_alert_active = True
+        label = str(best_detection.get("label", ""))
+        confidence = round(float(best_detection.get("confidence", 0.0)) * 100, 1)
+        source_name = self._source_name.strip() or self._source_id
+        source_line = source_name
+        if source_name != self._source_id:
+            source_line = f"{source_name} ({self._source_id})"
+
+        message = "\n".join(
+            [
+                "ALERTA DE LLENADO",
+                f"camara: {source_line}",
+                f"conexion: {self._connection_id}",
+                f"modelo: {self._model_id}",
+                f"llenado: {fill_percent}%",
+                f"label: {label}",
+                f"confianza: {confidence}%",
+            ]
+        )
+        self._telegram_notifier.notify_text(message)
 
     def _build_object_key(self, event_id: str, filename: str) -> str:
         date_prefix = datetime.now().strftime("%Y/%m/%d")
@@ -433,6 +495,7 @@ class SessionEventRecorder:
         self._frame_count += 1
         self._latency_total_ms += float(latency_ms)
         self._last_inference_at = utc_now_iso()
+        self._maybe_send_telegram_fill_alert(detections)
 
         result: dict[str, Any] = {}
         snapshot = self._maybe_store_periodic_snapshot(
@@ -508,18 +571,27 @@ class EventManager:
         self._storage = create_storage(settings)
         self._temp_dir = settings.resolve_temp_dir()
         self._temp_dir.mkdir(parents=True, exist_ok=True)
+        self._telegram_notifier: TelegramNotifier | None = None
+        if settings.telegram_enabled:
+            self._telegram_notifier = TelegramNotifier(
+                bot_token=settings.telegram_bot_token,
+                chat_id=settings.telegram_chat_id,
+                timeout_seconds=settings.telegram_timeout_seconds,
+            )
         self._recorders: dict[str, SessionEventRecorder] = {}
         self._lock = threading.Lock()
 
     def create_session(
         self,
         session_id: str,
+        connection_id: str,
         source_id: str,
         source_type: str,
         source_name: str,
         source_metadata: dict[str, Any],
         auth_username: str,
         remote_addr: str,
+        model_id: str,
         model_name: str,
         model_device: str,
     ) -> None:
@@ -560,10 +632,13 @@ class EventManager:
                 storage=self._storage,
                 temp_dir=self._temp_dir,
                 session_id=session_id,
+                connection_id=connection_id,
                 source_id=source_id,
                 source_type=source_type,
                 source_name=source_name,
                 source_metadata=source_metadata,
+                model_id=model_id,
+                telegram_notifier=self._telegram_notifier,
             )
 
     def process_frame(
@@ -645,3 +720,7 @@ class EventManager:
 
     def get_stats(self) -> dict[str, int]:
         return self._repository.get_stats()
+
+    def shutdown(self) -> None:
+        if self._telegram_notifier is not None:
+            self._telegram_notifier.stop()

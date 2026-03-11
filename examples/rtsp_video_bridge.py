@@ -17,6 +17,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--username", type=str, required=True)
     parser.add_argument("--password", type=str, required=True)
     parser.add_argument(
+        "--model-id",
+        type=str,
+        default="",
+        help="Modelo a usar en el backend, por ejemplo default o cana.",
+    )
+    parser.add_argument(
         "--source",
         type=str,
         required=True,
@@ -62,23 +68,26 @@ async def main() -> None:
             hello = json.loads(await websocket.recv())
             print(f"[hello] {hello}")
 
+            auth_payload = {
+                "type": "auth",
+                "username": args.username,
+                "password": args.password,
+                "source_id": args.source_id,
+                "source_type": "rtsp",
+                "source_name": args.source_name,
+                "source_metadata": {
+                    "capture_source": args.source,
+                },
+            }
+            if args.model_id.strip():
+                auth_payload["model_id"] = args.model_id.strip()
+
             await websocket.send(
-                json.dumps(
-                    {
-                        "type": "auth",
-                        "username": args.username,
-                        "password": args.password,
-                        "source_id": args.source_id,
-                        "source_type": "rtsp",
-                        "source_name": args.source_name,
-                        "source_metadata": {
-                            "capture_source": args.source,
-                        },
-                    }
-                )
+                json.dumps(auth_payload)
             )
             auth_ok = json.loads(await websocket.recv())
             print(f"[auth] {auth_ok}")
+            print(f"[auth] conexion corta: {auth_ok.get('connection_id')}")
 
             while True:
                 started = perf_counter()

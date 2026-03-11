@@ -14,7 +14,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from app.auth import AuthManager
 from app.config import ServiceSettings, load_settings
 from app.events import EventManager
-from app.inference import ModelRuntime
+from app.inference import ModelRegistry, ModelRuntime
 
 
 LOGGER = logging.getLogger("yolo.websocket")
@@ -49,17 +49,34 @@ def _require_text_json(raw_text: str) -> dict:
     return payload
 
 
+def _requested_model_from_payload(
+    payload: dict[str, Any],
+    settings: ServiceSettings,
+    default_model_id: str,
+) -> str:
+    for key in ("model_id", "model_selection", "requested_model", "model"):
+        raw_value = payload.get(key)
+        if raw_value is None:
+            continue
+        normalized = str(raw_value).strip()
+        if normalized:
+            return settings.resolve_requested_model_id(normalized)
+    return default_model_id
+
+
 async def _authenticate(
     websocket: WebSocket,
     settings: ServiceSettings,
     auth_manager: AuthManager,
-    runtime: ModelRuntime,
+    registry: ModelRegistry,
 ) -> dict[str, Any] | None:
     await websocket.send_json(
         {
             "type": "hello",
             "protocol": "yolo-ws-v1",
             "message": "Send auth message first.",
+            "default_model_id": registry.default_model_id,
+            "available_models": registry.list_models(),
         }
     )
 
@@ -107,33 +124,47 @@ async def _authenticate(
         return None
 
     session_id = uuid4().hex
-    source_id = str(payload.get("source_id") or session_id)
+    connection_id = session_id[:8]
+    source_id = str(payload.get("source_id") or f"ws-{connection_id}").strip() or f"ws-{connection_id}"
     source_type = str(payload.get("source_type") or "websocket").strip() or "websocket"
     source_name = str(payload.get("source_name") or source_id).strip() or source_id
+    model_id = _requested_model_from_payload(payload, settings, registry.default_model_id)
     source_metadata = payload.get("source_metadata")
     if not isinstance(source_metadata, dict):
         source_metadata = {}
+
+    try:
+        runtime = registry.get(model_id)
+    except KeyError:
+        await websocket.send_json(
+            _error_payload("invalid_model", f"Modelo no disponible: {model_id}.")
+        )
+        await websocket.close(code=1008)
+        return None
 
     await websocket.send_json(
         {
             "type": "auth_ok",
             "session_id": session_id,
+            "connection_id": connection_id,
             "source_id": source_id,
             "source_type": source_type,
             "source_name": source_name,
-            "model": {
-                "name": runtime.model_name,
-                "device": runtime.device,
-            },
+            "model": runtime.describe(),
+            "default_model_id": registry.default_model_id,
+            "available_models": registry.list_models(),
         }
     )
     return {
         "session_id": session_id,
+        "connection_id": connection_id,
         "source_id": source_id,
         "source_type": source_type,
         "source_name": source_name,
         "source_metadata": source_metadata,
         "auth_username": username,
+        "model_id": model_id,
+        "runtime": runtime,
     }
 
 
@@ -143,16 +174,18 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        runtime = await asyncio.to_thread(ModelRuntime, settings)
+        model_registry = await asyncio.to_thread(ModelRegistry, settings)
+        event_manager = EventManager(settings)
         app.state.settings = settings
-        app.state.runtime = runtime
-        app.state.event_manager = EventManager(settings)
+        app.state.model_registry = model_registry
+        app.state.event_manager = event_manager
         app.state.auth_manager = AuthManager(
             username=settings.auth_username,
             password=settings.auth_password,
             password_hash=settings.auth_password_hash,
         )
         yield
+        event_manager.shutdown()
 
     app = FastAPI(
         title="YOLO WebSocket Inference Service",
@@ -162,25 +195,36 @@ def create_app() -> FastAPI:
 
     @app.get("/")
     async def root() -> dict:
-        runtime: ModelRuntime = app.state.runtime
+        model_registry: ModelRegistry = app.state.model_registry
+        runtime = model_registry.get()
         return {
             "service": "yolo-websocket-inference",
             "status": "ok",
             "ws_path": "/ws/infer",
-            "model": {
-                "name": runtime.model_name,
-                "device": runtime.device,
-            },
+            "default_model_id": model_registry.default_model_id,
+            "model": runtime.describe(),
+            "available_models": model_registry.list_models(),
         }
 
     @app.get("/healthz")
     async def healthz() -> dict:
-        runtime: ModelRuntime = app.state.runtime
+        model_registry: ModelRegistry = app.state.model_registry
+        runtime = model_registry.get()
         return {
             "status": "ok",
             "model_loaded": True,
+            "default_model_id": model_registry.default_model_id,
             "model_name": runtime.model_name,
             "device": runtime.device,
+            "models": model_registry.list_models(),
+        }
+
+    @app.get("/models")
+    async def list_models() -> dict:
+        model_registry: ModelRegistry = app.state.model_registry
+        return {
+            "default_model_id": model_registry.default_model_id,
+            "items": model_registry.list_models(),
         }
 
     @app.get("/events")
@@ -220,30 +264,35 @@ def create_app() -> FastAPI:
     async def infer_socket(websocket: WebSocket) -> None:
         await websocket.accept()
 
-        runtime: ModelRuntime = app.state.runtime
+        model_registry: ModelRegistry = app.state.model_registry
         event_manager: EventManager = app.state.event_manager
         auth_manager: AuthManager = app.state.auth_manager
         settings: ServiceSettings = app.state.settings
 
-        session = await _authenticate(websocket, settings, auth_manager, runtime)
+        session = await _authenticate(websocket, settings, auth_manager, model_registry)
         if session is None:
             return
         session_id = session["session_id"]
+        connection_id = session["connection_id"]
         source_id = session["source_id"]
         source_type = session["source_type"]
         source_name = session["source_name"]
         source_metadata = session["source_metadata"]
+        runtime: ModelRuntime = session["runtime"]
+        model_id = session["model_id"]
         remote_addr = ""
         if websocket.client is not None:
             remote_addr = f"{websocket.client.host}:{websocket.client.port}"
         event_manager.create_session(
             session_id=session_id,
+            connection_id=connection_id,
             source_id=source_id,
             source_type=source_type,
             source_name=source_name,
             source_metadata=source_metadata,
             auth_username=session["auth_username"],
             remote_addr=remote_addr,
+            model_id=model_id,
             model_name=runtime.model_name,
             model_device=runtime.device,
         )
@@ -290,6 +339,20 @@ def create_app() -> FastAPI:
                     return_image = bool(
                         payload.get("return_image", settings.default_return_image)
                     )
+                    requested_model_id = _requested_model_from_payload(
+                        payload,
+                        settings,
+                        model_id,
+                    )
+                    if requested_model_id != model_id:
+                        await websocket.send_json(
+                            _error_payload(
+                                "model_locked",
+                                f"La sesion usa el modelo '{model_id}'. Abre otra conexion para usar '{requested_model_id}'.",
+                                frame_id=frame_id,
+                            )
+                        )
+                        continue
 
                     image_b64 = payload.get("image_b64")
                     if not image_b64:

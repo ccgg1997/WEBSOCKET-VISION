@@ -24,6 +24,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--username", type=str, required=True)
     parser.add_argument("--password", type=str, required=True)
+    parser.add_argument(
+        "--model-id",
+        type=str,
+        default="",
+        help="Modelo a usar en el backend, por ejemplo default o cana.",
+    )
     parser.add_argument("--camera", type=int, default=0)
     parser.add_argument("--source-id", type=str, default="camera-local-01")
     parser.add_argument("--source-name", type=str, default="Camara Local")
@@ -53,21 +59,24 @@ async def authenticate(
     source_name: str,
     username: str,
     password: str,
+    model_id: str,
 ) -> None:
     greeting = json.loads(await websocket.recv())
     print(f"[server] {greeting}")
 
+    auth_payload = {
+        "type": "auth",
+        "username": username,
+        "password": password,
+        "source_id": source_id,
+        "source_type": "camera",
+        "source_name": source_name,
+    }
+    if model_id.strip():
+        auth_payload["model_id"] = model_id.strip()
+
     await websocket.send(
-        json.dumps(
-            {
-                "type": "auth",
-                "username": username,
-                "password": password,
-                "source_id": source_id,
-                "source_type": "camera",
-                "source_name": source_name,
-            }
-        )
+        json.dumps(auth_payload)
     )
 
     auth_response = json.loads(await websocket.recv())
@@ -75,6 +84,7 @@ async def authenticate(
         raise RuntimeError(f"Autenticacion fallida: {auth_response}")
 
     print(f"[auth] sesion iniciada: {auth_response['session_id']}")
+    print(f"[auth] conexion corta: {auth_response.get('connection_id')}")
     print(f"[auth] modelo: {auth_response['model']}")
 
 
@@ -101,6 +111,7 @@ async def stream_camera(args: argparse.Namespace) -> None:
                 args.source_name,
                 args.username,
                 args.password,
+                args.model_id,
             )
 
             while True:

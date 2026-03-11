@@ -17,7 +17,7 @@ import numpy as np
 import torch
 from ultralytics import YOLO
 
-from app.config import ServiceSettings
+from app.config import ModelDefinition, ServiceSettings
 
 
 LOGGER = logging.getLogger(__name__)
@@ -45,29 +45,29 @@ def _validate_sha256(path: Path, expected_sha256: str) -> None:
         )
 
 
-def ensure_model_file(settings: ServiceSettings) -> Path:
-    model_path = settings.resolve_model_path()
+def ensure_model_file(settings: ServiceSettings, definition: ModelDefinition) -> Path:
+    model_path = definition.resolve_path(settings.service_root)
     if model_path.exists():
         return model_path
 
-    if not settings.model_url:
+    if not definition.url:
         raise FileNotFoundError(
-            f"No se encontro el modelo en {model_path}. "
-            "Define YOLO_WS_MODEL_PATH o YOLO_WS_MODEL_URL."
+            f"No se encontro el modelo '{definition.model_id}' en {model_path}. "
+            "Define YOLO_WS_MODEL_PATH o usa YOLO_WS_MODEL_IDS con YOLO_WS_MODEL_<ID>_PATH/URL."
         )
 
     model_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = model_path.with_suffix(model_path.suffix + ".part")
 
-    LOGGER.info("Downloading model from %s", settings.model_url)
+    LOGGER.info("Downloading model '%s' from %s", definition.model_id, definition.url)
     try:
         with urllib.request.urlopen(
-            settings.model_url, timeout=settings.model_download_timeout
+            definition.url, timeout=settings.model_download_timeout
         ) as response, temp_path.open("wb") as destination:
             shutil.copyfileobj(response, destination)
 
-        if settings.model_sha256:
-            _validate_sha256(temp_path, settings.model_sha256)
+        if definition.sha256:
+            _validate_sha256(temp_path, definition.sha256)
 
         temp_path.replace(model_path)
     finally:
@@ -124,18 +124,34 @@ def draw_detections(frame: np.ndarray, detections: list[dict[str, Any]]) -> np.n
 
 
 class ModelRuntime:
-    def __init__(self, settings: ServiceSettings) -> None:
+    def __init__(self, settings: ServiceSettings, definition: ModelDefinition) -> None:
         self.settings = settings
-        self.model_path = ensure_model_file(settings)
+        self.model_id = definition.model_id
+        self.model_path = ensure_model_file(settings, definition)
         self.device = self._resolve_device(settings.device)
         self.model = YOLO(str(self.model_path)).to(self.device)
-        self.model_name = self.model_path.name
+        self.model_name = definition.display_name or self.model_path.name
+        self.model_file_name = self.model_path.name
         self._predict_lock = threading.Lock()
 
         if self.device == "cpu":
             torch.set_num_threads(settings.torch_threads)
 
-        LOGGER.info("Model loaded: path=%s device=%s", self.model_path, self.device)
+        LOGGER.info(
+            "Model loaded: id=%s name=%s path=%s device=%s",
+            self.model_id,
+            self.model_name,
+            self.model_path,
+            self.device,
+        )
+
+    def describe(self) -> dict[str, str]:
+        return {
+            "id": self.model_id,
+            "name": self.model_name,
+            "file_name": self.model_file_name,
+            "device": self.device,
+        }
 
     @staticmethod
     def _resolve_device(device_preference: str) -> str:
@@ -200,10 +216,7 @@ class ModelRuntime:
                 "by_label": dict(counts),
             },
             "detections": detections,
-            "model": {
-                "name": self.model_name,
-                "device": self.device,
-            },
+            "model": self.describe(),
         }
 
         if return_image:
@@ -221,3 +234,22 @@ class ModelRuntime:
 
         return payload
 
+
+class ModelRegistry:
+    def __init__(self, settings: ServiceSettings) -> None:
+        self.settings = settings
+        self.default_model_id = settings.resolve_default_model_id()
+        self._runtimes: dict[str, ModelRuntime] = {}
+
+        for model_id, definition in settings.resolve_model_definitions().items():
+            self._runtimes[model_id] = ModelRuntime(settings, definition)
+
+    def get(self, model_id: str | None = None) -> ModelRuntime:
+        selected_id = model_id or self.default_model_id
+        runtime = self._runtimes.get(selected_id)
+        if runtime is None:
+            raise KeyError(selected_id)
+        return runtime
+
+    def list_models(self) -> list[dict[str, str]]:
+        return [runtime.describe() for runtime in self._runtimes.values()]
