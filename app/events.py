@@ -72,6 +72,9 @@ class ActiveEvent:
     file_stem: str
     clip_temp_path: Path
     preview_temp_path: Path
+    storage_prefix: str
+    notify_telegram: bool
+    event_kind: str
     annotation: str
     detections: list[dict[str, Any]]
     end_time: float
@@ -115,7 +118,7 @@ class SessionEventRecorder:
         self._event_count = 0
         self._latency_total_ms = 0.0
         self._last_inference_at: str | None = None
-        self._telegram_alert_active = False
+        self._fill_event_active = False
 
     @property
     def source_id(self) -> str:
@@ -190,56 +193,100 @@ class SessionEventRecorder:
                 best_percent = percent
         return best_detection, best_percent
 
-    def _maybe_send_telegram_fill_alert(
+    def _format_source_line(self) -> str:
+        source_name = self._source_name.strip() or self._source_id
+        if source_name != self._source_id:
+            return f"{source_name} ({self._source_id})"
+        return source_name
+
+    def _resolve_fill_event_trigger(
         self,
         detections: list[dict[str, Any]],
-    ) -> None:
-        if self._telegram_notifier is None:
-            return
+    ) -> dict[str, Any] | None:
         if self._model_id not in self._settings.telegram_model_ids:
-            return
+            self._fill_event_active = False
+            return None
 
         best_detection, fill_percent = self._resolve_fill_level(detections)
         if best_detection is None or fill_percent <= self._settings.telegram_fill_threshold:
-            self._telegram_alert_active = False
+            self._fill_event_active = False
+            return None
+
+        if self._active_event is not None and self._active_event.event_kind != "fill":
+            return None
+
+        if self._fill_event_active:
+            return None
+
+        self._fill_event_active = True
+        return best_detection
+
+    def _queue_fill_event_notification(
+        self,
+        active: ActiveEvent,
+        *,
+        preview_bytes: bytes,
+        clip_url: str,
+    ) -> None:
+        if self._telegram_notifier is None or not active.notify_telegram:
             return
 
-        if self._telegram_alert_active:
-            return
-
-        self._telegram_alert_active = True
-        label = str(best_detection.get("label", ""))
-        confidence = round(float(best_detection.get("confidence", 0.0)) * 100, 1)
-        source_name = self._source_name.strip() or self._source_id
-        source_line = source_name
-        if source_name != self._source_id:
-            source_line = f"{source_name} ({self._source_id})"
-
-        message = "\n".join(
+        confidence = round(active.confidence * 100, 1)
+        source_line = self._format_source_line()
+        caption = "\n".join(
             [
                 "ALERTA DE LLENADO",
                 f"camara: {source_line}",
                 f"conexion: {self._connection_id}",
                 f"modelo: {self._model_id}",
-                f"llenado: {fill_percent}%",
-                f"label: {label}",
+                f"llenado: {active.trigger_percent}%",
+                f"label: {active.trigger_label}",
                 f"confianza: {confidence}%",
             ]
         )
+        message = "\n".join(
+            [
+                "VIDEO EVENTO CANA",
+                f"camara: {source_line}",
+                f"conexion: {self._connection_id}",
+                f"modelo: {self._model_id}",
+                f"llenado: {active.trigger_percent}%",
+                f"video: {clip_url}",
+            ]
+        )
         LOGGER.info(
-            "Telegram fill alert queued: source=%s connection=%s model=%s fill=%s label=%s confidence=%s",
+            "Telegram fill event media queued: source=%s connection=%s model=%s fill=%s clip=%s",
             self._source_id,
             self._connection_id,
             self._model_id,
-            fill_percent,
-            label,
-            confidence,
+            active.trigger_percent,
+            clip_url,
         )
+        if preview_bytes:
+            self._telegram_notifier.notify_photo(
+                photo_bytes=preview_bytes,
+                filename=f"{active.file_stem}_snapshot.jpg",
+                caption=caption,
+            )
+        else:
+            LOGGER.warning(
+                "Telegram fill event preview is empty: source=%s connection=%s event=%s",
+                self._source_id,
+                self._connection_id,
+                active.event_id,
+            )
         self._telegram_notifier.notify_text(message)
 
-    def _build_object_key(self, event_id: str, filename: str) -> str:
+    def _build_object_key(
+        self,
+        event_id: str,
+        filename: str,
+        *,
+        storage_prefix: str | None = None,
+    ) -> str:
         date_prefix = datetime.now().strftime("%Y/%m/%d")
-        base_prefix = self._settings.minio_prefix.strip("/").replace("\\", "/")
+        base_prefix_raw = storage_prefix or self._settings.minio_prefix
+        base_prefix = base_prefix_raw.strip("/").replace("\\", "/")
         source_prefix = self._source_id.replace("\\", "-").replace("/", "-")
         return f"{base_prefix}/{date_prefix}/{source_prefix}/{event_id}/{filename}"
 
@@ -332,20 +379,36 @@ class SessionEventRecorder:
         ended_at = utc_now_iso()
         preview_filename = f"{active.file_stem}_snapshot.jpg"
         clip_filename = f"{active.file_stem}_clip.mp4"
+        preview_bytes = b""
+        if active.notify_telegram and self._telegram_notifier is not None:
+            try:
+                preview_bytes = active.preview_temp_path.read_bytes()
+            except OSError as exc:
+                LOGGER.error(
+                    "Could not read preview image for Telegram: source=%s event=%s error=%s",
+                    self._source_id,
+                    active.event_id,
+                    exc,
+                )
 
         preview_object = self._storage.upload_file(
             local_path=active.preview_temp_path,
-            object_key=self._build_object_key(active.event_id, preview_filename),
+            object_key=self._build_object_key(
+                active.event_id,
+                preview_filename,
+                storage_prefix=active.storage_prefix,
+            ),
             content_type="image/jpeg",
         )
         clip_object = self._storage.upload_file(
             local_path=active.clip_temp_path,
-            object_key=self._build_object_key(active.event_id, clip_filename),
+            object_key=self._build_object_key(
+                active.event_id,
+                clip_filename,
+                storage_prefix=active.storage_prefix,
+            ),
             content_type="video/mp4",
         )
-
-        active.preview_temp_path.unlink(missing_ok=True)
-        active.clip_temp_path.unlink(missing_ok=True)
 
         record = {
             "id": active.event_id,
@@ -375,13 +438,7 @@ class SessionEventRecorder:
         self._last_event_at = timestamp if timestamp is not None else time.time()
         self._event_count += 1
 
-        LOGGER.info(
-            "Event saved: id=%s source=%s clip=%s",
-            record["id"],
-            record["source_id"],
-            record["clip_object_key"],
-        )
-        return {
+        event_payload = {
             "state": "saved",
             "event_id": record["id"],
             "snapshot_id": record["snapshot_id"],
@@ -401,6 +458,25 @@ class SessionEventRecorder:
             "annotation": record["annotation"],
         }
 
+        if active.notify_telegram:
+            self._queue_fill_event_notification(
+                active,
+                preview_bytes=preview_bytes,
+                clip_url=event_payload["clip_url"],
+            )
+
+        active.preview_temp_path.unlink(missing_ok=True)
+        active.clip_temp_path.unlink(missing_ok=True)
+
+        LOGGER.info(
+            "Event saved: id=%s source=%s kind=%s clip=%s",
+            record["id"],
+            record["source_id"],
+            active.event_kind,
+            record["clip_object_key"],
+        )
+        return event_payload
+
     def _start_event(
         self,
         timestamp: float,
@@ -408,6 +484,10 @@ class SessionEventRecorder:
         detections: list[dict[str, Any]],
         trigger_detection: dict[str, Any],
         snapshot_id: str | None,
+        *,
+        storage_prefix: str | None = None,
+        notify_telegram: bool = False,
+        event_kind: str = "trigger",
     ) -> dict[str, Any]:
         event_id = uuid4().hex
         temp_event_dir = self._temp_dir / datetime.now().strftime("%Y%m%d")
@@ -444,7 +524,13 @@ class SessionEventRecorder:
         file_stem = (
             f"{detected_clock.strftime('%H%M%S')}_{sanitize_label_for_filename(trigger_label)}"
         )
-        if trigger_percent > 0:
+        if event_kind == "fill":
+            annotation = (
+                f"Llenado {trigger_percent}% detectado en fuente {self._source_id} "
+                f"con modelo {self._model_id}. Se guardaron "
+                f"{self._settings.clip_seconds} segundos de evidencia."
+            )
+        elif trigger_percent > 0:
             annotation = (
                 f"Trigger {trigger_label} ({trigger_percent}%) detectado en fuente "
                 f"{self._source_id}. Se guardaron {self._settings.clip_seconds} segundos "
@@ -468,6 +554,9 @@ class SessionEventRecorder:
             file_stem=file_stem,
             clip_temp_path=clip_temp_path,
             preview_temp_path=preview_temp_path,
+            storage_prefix=(storage_prefix or self._settings.minio_prefix),
+            notify_telegram=notify_telegram,
+            event_kind=event_kind,
             annotation=annotation,
             detections=detections,
             end_time=timestamp + self._settings.clip_seconds,
@@ -475,9 +564,10 @@ class SessionEventRecorder:
         )
 
         LOGGER.info(
-            "Event started: id=%s source=%s trigger=%s",
+            "Event started: id=%s source=%s kind=%s trigger=%s",
             event_id,
             self._source_id,
+            event_kind,
             trigger_label,
         )
         return {
@@ -487,6 +577,7 @@ class SessionEventRecorder:
             "clip_seconds": self._settings.clip_seconds,
             "trigger_label": trigger_label,
             "trigger_percent": trigger_percent,
+            "event_kind": event_kind,
             "annotation": annotation,
         }
 
@@ -504,7 +595,7 @@ class SessionEventRecorder:
         self._frame_count += 1
         self._latency_total_ms += float(latency_ms)
         self._last_inference_at = utc_now_iso()
-        self._maybe_send_telegram_fill_alert(detections)
+        fill_trigger_detection = self._resolve_fill_event_trigger(detections)
 
         result: dict[str, Any] = {}
         snapshot = self._maybe_store_periodic_snapshot(
@@ -535,13 +626,15 @@ class SessionEventRecorder:
                     "snapshot_id": self._active_event.snapshot_id,
                     "clip_seconds": self._settings.clip_seconds,
                     "trigger_label": self._active_event.trigger_label,
+                    "event_kind": self._active_event.event_kind,
                 }
             return result or None
 
         if timestamp - self._last_event_at < self._settings.event_cooldown_seconds:
             return result or None
 
-        trigger_detection = self._resolve_trigger(detections)
+        event_kind = "fill" if fill_trigger_detection is not None else "trigger"
+        trigger_detection = fill_trigger_detection or self._resolve_trigger(detections)
         if trigger_detection is None:
             return result or None
 
@@ -552,7 +645,7 @@ class SessionEventRecorder:
                 counts=counts,
                 latency_ms=latency_ms,
                 timestamp=timestamp,
-                event_state="trigger",
+                event_state=event_kind,
             )
             result["snapshot"] = snapshot
 
@@ -563,6 +656,13 @@ class SessionEventRecorder:
             detections=detections,
             trigger_detection=trigger_detection,
             snapshot_id=snapshot.get("id"),
+            storage_prefix=(
+                self._settings.fill_event_storage_prefix
+                if event_kind == "fill"
+                else self._settings.minio_prefix
+            ),
+            notify_telegram=event_kind == "fill",
+            event_kind=event_kind,
         )
         result["event"] = event
         return result or None

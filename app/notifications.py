@@ -4,11 +4,25 @@ import json
 import logging
 import queue
 import threading
+from dataclasses import dataclass
+from uuid import uuid4
 import urllib.error
 import urllib.request
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class TelegramTextNotification:
+    text: str
+
+
+@dataclass(frozen=True)
+class TelegramPhotoNotification:
+    photo_bytes: bytes
+    filename: str
+    caption: str
 
 
 class TelegramNotifier:
@@ -21,7 +35,9 @@ class TelegramNotifier:
         self._bot_token = bot_token
         self._chat_id = chat_id
         self._timeout_seconds = timeout_seconds
-        self._queue: queue.Queue[str | None] = queue.Queue(maxsize=200)
+        self._queue: queue.Queue[
+            TelegramTextNotification | TelegramPhotoNotification | None
+        ] = queue.Queue(maxsize=200)
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -34,16 +50,89 @@ class TelegramNotifier:
 
     def notify_text(self, text: str) -> None:
         try:
-            self._queue.put_nowait(text)
+            self._queue.put_nowait(TelegramTextNotification(text=text))
         except queue.Full:
             LOGGER.warning("Telegram queue is full. Dropping message.")
 
+    def notify_photo(self, photo_bytes: bytes, filename: str, caption: str) -> None:
+        if not photo_bytes:
+            LOGGER.warning("Telegram photo payload is empty. Dropping message.")
+            return
+        safe_filename = filename.strip() or "event.jpg"
+        try:
+            self._queue.put_nowait(
+                TelegramPhotoNotification(
+                    photo_bytes=photo_bytes,
+                    filename=safe_filename,
+                    caption=caption,
+                )
+            )
+        except queue.Full:
+            LOGGER.warning("Telegram queue is full. Dropping photo.")
+
     def _run(self) -> None:
         while True:
-            message = self._queue.get()
-            if message is None:
+            notification = self._queue.get()
+            if notification is None:
                 return
-            self._send_message(message)
+            if isinstance(notification, TelegramTextNotification):
+                self._send_message(notification.text)
+                continue
+            self._send_photo(
+                photo_bytes=notification.photo_bytes,
+                filename=notification.filename,
+                caption=notification.caption,
+            )
+
+    @staticmethod
+    def _extract_error_description(body: str) -> str:
+        description = body
+        if body:
+            try:
+                response_payload = json.loads(body)
+            except json.JSONDecodeError:
+                response_payload = None
+            if isinstance(response_payload, dict):
+                description = str(response_payload.get("description") or body)
+        return description
+
+    @staticmethod
+    def _encode_multipart(
+        fields: dict[str, str],
+        *,
+        file_field: str,
+        filename: str,
+        content_type: str,
+        file_bytes: bytes,
+    ) -> tuple[str, bytes]:
+        boundary = f"----telegram-{uuid4().hex}"
+        body: list[bytes] = []
+        for name, value in fields.items():
+            body.extend(
+                [
+                    f"--{boundary}\r\n".encode("utf-8"),
+                    (
+                        f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                    ).encode("utf-8"),
+                    str(value).encode("utf-8"),
+                    b"\r\n",
+                ]
+            )
+
+        body.extend(
+            [
+                f"--{boundary}\r\n".encode("utf-8"),
+                (
+                    'Content-Disposition: form-data; name="'
+                    f'{file_field}"; filename="{filename}"\r\n'
+                ).encode("utf-8"),
+                f"Content-Type: {content_type}\r\n\r\n".encode("utf-8"),
+                file_bytes,
+                b"\r\n",
+                f"--{boundary}--\r\n".encode("utf-8"),
+            ]
+        )
+        return boundary, b"".join(body)
 
     def _send_message(self, text: str) -> None:
         url = f"https://api.telegram.org/bot{self._bot_token}/sendMessage"
@@ -68,14 +157,7 @@ class TelegramNotifier:
                 response.read()
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace").strip()
-            description = body
-            if body:
-                try:
-                    response_payload = json.loads(body)
-                except json.JSONDecodeError:
-                    response_payload = None
-                if isinstance(response_payload, dict):
-                    description = str(response_payload.get("description") or body)
+            description = self._extract_error_description(body)
             LOGGER.error(
                 "Telegram notification failed: status=%s reason=%s detail=%s",
                 exc.code,
@@ -84,3 +166,40 @@ class TelegramNotifier:
             )
         except urllib.error.URLError as exc:
             LOGGER.error("Telegram notification failed: %s", exc)
+
+    def _send_photo(self, photo_bytes: bytes, filename: str, caption: str) -> None:
+        url = f"https://api.telegram.org/bot{self._bot_token}/sendPhoto"
+        boundary, payload = self._encode_multipart(
+            {
+                "chat_id": self._chat_id,
+                "caption": caption,
+            },
+            file_field="photo",
+            filename=filename,
+            content_type="image/jpeg",
+            file_bytes=photo_bytes,
+        )
+        request = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(
+                request,
+                timeout=self._timeout_seconds,
+            ) as response:
+                response.read()
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace").strip()
+            description = self._extract_error_description(body)
+            LOGGER.error(
+                "Telegram photo notification failed: status=%s reason=%s detail=%s",
+                exc.code,
+                exc.reason,
+                description,
+            )
+        except urllib.error.URLError as exc:
+            LOGGER.error("Telegram photo notification failed: %s", exc)

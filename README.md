@@ -178,6 +178,15 @@ El servicio ya soporta este flujo:
 El upload a MinIO ocurre cuando el evento se cierra y se persiste dentro de
 `app/events.py`, en la rutina `_finalize_event`.
 
+Para el modelo `cana`, si el llenado detectado supera
+`YOLO_WS_TELEGRAM_FILL_THRESHOLD`, el backend reutiliza este mismo pipeline
+de eventos para guardar:
+
+- una imagen anotada
+- 5 segundos de clip
+- ambos bajo el prefijo `YOLO_WS_FILL_EVENT_STORAGE_PREFIX` en MinIO
+- y al cerrar el evento envia por Telegram la foto anotada y el link firmado del video
+
 Por defecto:
 
 - trigger: `YOLO_WS_TRIGGER_LABELS=25`
@@ -221,6 +230,7 @@ Por defecto:
 - `YOLO_WS_TELEGRAM_CHAT_ID`: chat destino.
 - `YOLO_WS_TELEGRAM_MODEL_IDS`: modelos que disparan esta logica, por ejemplo `cana`.
 - `YOLO_WS_TELEGRAM_FILL_THRESHOLD`: umbral estricto de llenado. Si el porcentaje detectado es mayor a este valor, envia alerta.
+- `YOLO_WS_FILL_EVENT_STORAGE_PREFIX`: prefijo MinIO para estos eventos de llenado, por ejemplo `cana`.
 - `YOLO_WS_STORAGE_BACKEND`: `minio` o `local`.
 - `YOLO_WS_MINIO_*`: credenciales y bucket del object storage.
 - `YOLO_WS_PRESIGNED_URL_EXPIRY_SECONDS`: vigencia de las URLs firmadas.

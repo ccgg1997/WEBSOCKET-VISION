@@ -220,6 +220,9 @@ class ServiceSettings:
     telegram_timeout_seconds: int = field(
         default_factory=lambda: _env_int("YOLO_WS_TELEGRAM_TIMEOUT_SECONDS", 10)
     )
+    fill_event_storage_prefix: str = field(
+        default_factory=lambda: _env("YOLO_WS_FILL_EVENT_STORAGE_PREFIX", "cana")
+    )
     database_url_raw: str = field(
         default_factory=lambda: _env("YOLO_WS_DATABASE_URL", "")
     )
@@ -396,6 +399,8 @@ class ServiceSettings:
             raise ValueError("YOLO_WS_TELEGRAM_FILL_THRESHOLD debe estar entre 0 y 100.")
         if self.telegram_timeout_seconds <= 0:
             raise ValueError("YOLO_WS_TELEGRAM_TIMEOUT_SECONDS debe ser mayor que 0.")
+        if not self.fill_event_storage_prefix.strip():
+            raise ValueError("YOLO_WS_FILL_EVENT_STORAGE_PREFIX no puede estar vacio.")
         if self.telegram_enabled:
             if not self.telegram_bot_token:
                 raise ValueError("Define YOLO_WS_TELEGRAM_BOT_TOKEN.")
