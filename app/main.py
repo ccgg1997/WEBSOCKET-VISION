@@ -38,6 +38,32 @@ def _error_payload(code: str, detail: str, frame_id: str | None = None) -> dict[
     return payload
 
 
+async def _safe_send_json(websocket: WebSocket, payload: Any) -> bool:
+    try:
+        await websocket.send_json(payload)
+        return True
+    except (RuntimeError, WebSocketDisconnect):
+        return False
+
+
+async def _safe_close(websocket: WebSocket, code: int = 1000) -> None:
+    try:
+        await websocket.close(code=code)
+    except (RuntimeError, WebSocketDisconnect):
+        return
+
+
+async def _reject_auth(
+    websocket: WebSocket,
+    code: str,
+    detail: str,
+    *,
+    close_code: int = 1008,
+) -> None:
+    await _safe_send_json(websocket, _error_payload(code, detail))
+    await _safe_close(websocket, code=close_code)
+
+
 def _require_text_json(raw_text: str) -> dict:
     try:
         payload = json.loads(raw_text)
@@ -70,7 +96,8 @@ async def _authenticate(
     auth_manager: AuthManager,
     registry: ModelRegistry,
 ) -> dict[str, Any] | None:
-    await websocket.send_json(
+    hello_sent = await _safe_send_json(
+        websocket,
         {
             "type": "hello",
             "protocol": "yolo-ws-v1",
@@ -79,6 +106,8 @@ async def _authenticate(
             "available_models": registry.list_models(),
         }
     )
+    if not hello_sent:
+        return None
 
     try:
         incoming = await asyncio.wait_for(
@@ -86,41 +115,49 @@ async def _authenticate(
             timeout=settings.auth_timeout_seconds,
         )
     except asyncio.TimeoutError:
-        await websocket.send_json(
-            _error_payload("auth_timeout", "No auth message received in time.")
+        await _reject_auth(
+            websocket,
+            "auth_timeout",
+            "No auth message received in time.",
         )
-        await websocket.close(code=1008)
+        return None
+    except WebSocketDisconnect:
+        return None
+
+    if incoming.get("type") == "websocket.disconnect":
         return None
 
     raw_text = incoming.get("text")
     if incoming.get("bytes") is not None or raw_text is None:
-        await websocket.send_json(
-            _error_payload("auth_required", "The first message must be JSON auth.")
+        await _reject_auth(
+            websocket,
+            "auth_required",
+            "The first message must be JSON auth.",
         )
-        await websocket.close(code=1008)
         return None
 
     try:
         payload = _require_text_json(raw_text)
     except ValueError as exc:
-        await websocket.send_json(_error_payload("invalid_auth", str(exc)))
-        await websocket.close(code=1008)
+        await _reject_auth(websocket, "invalid_auth", str(exc))
         return None
 
     if payload.get("type") != "auth":
-        await websocket.send_json(
-            _error_payload("auth_required", "The first message must be type=auth.")
+        await _reject_auth(
+            websocket,
+            "auth_required",
+            "The first message must be type=auth.",
         )
-        await websocket.close(code=1008)
         return None
 
     username = str(payload.get("username", "")).strip()
     password = str(payload.get("password", ""))
     if not auth_manager.verify(username, password):
-        await websocket.send_json(
-            _error_payload("invalid_credentials", "Authentication failed.")
+        await _reject_auth(
+            websocket,
+            "invalid_credentials",
+            "Authentication failed.",
         )
-        await websocket.close(code=1008)
         return None
 
     session_id = uuid4().hex
@@ -136,13 +173,15 @@ async def _authenticate(
     try:
         runtime = registry.get(model_id)
     except KeyError:
-        await websocket.send_json(
-            _error_payload("invalid_model", f"Modelo no disponible: {model_id}.")
+        await _reject_auth(
+            websocket,
+            "invalid_model",
+            f"Modelo no disponible: {model_id}.",
         )
-        await websocket.close(code=1008)
         return None
 
-    await websocket.send_json(
+    auth_sent = await _safe_send_json(
+        websocket,
         {
             "type": "auth_ok",
             "session_id": session_id,
@@ -155,6 +194,8 @@ async def _authenticate(
             "available_models": registry.list_models(),
         }
     )
+    if not auth_sent:
+        return None
     return {
         "session_id": session_id,
         "connection_id": connection_id,
@@ -323,22 +364,27 @@ def create_app() -> FastAPI:
                     try:
                         payload = _require_text_json(raw_text)
                     except ValueError as exc:
-                        await websocket.send_json(
-                            _error_payload("invalid_message", str(exc))
-                        )
+                        if not await _safe_send_json(
+                            websocket,
+                            _error_payload("invalid_message", str(exc)),
+                        ):
+                            break
                         continue
 
                     message_type = payload.get("type")
                     if message_type == "ping":
-                        await websocket.send_json({"type": "pong"})
+                        if not await _safe_send_json(websocket, {"type": "pong"}):
+                            break
                         continue
                     if message_type != "frame":
-                        await websocket.send_json(
+                        if not await _safe_send_json(
+                            websocket,
                             _error_payload(
                                 "unsupported_message",
                                 "Use type=frame or send binary JPEG bytes.",
-                            )
-                        )
+                            ),
+                        ):
+                            break
                         continue
 
                     frame_id = str(payload.get("frame_id") or frame_id)
@@ -351,54 +397,64 @@ def create_app() -> FastAPI:
                         model_id,
                     )
                     if requested_model_id != model_id:
-                        await websocket.send_json(
+                        if not await _safe_send_json(
+                            websocket,
                             _error_payload(
                                 "model_locked",
                                 f"La sesion usa el modelo '{model_id}'. Abre otra conexion para usar '{requested_model_id}'.",
                                 frame_id=frame_id,
-                            )
-                        )
+                            ),
+                        ):
+                            break
                         continue
 
                     image_b64 = payload.get("image_b64")
                     if not image_b64:
-                        await websocket.send_json(
+                        if not await _safe_send_json(
+                            websocket,
                             _error_payload(
                                 "missing_image",
                                 "The frame message requires image_b64.",
                                 frame_id=frame_id,
-                            )
-                        )
+                            ),
+                        ):
+                            break
                         continue
 
                     try:
                         frame_bytes = base64.b64decode(image_b64, validate=True)
                     except (ValueError, TypeError):
-                        await websocket.send_json(
+                        if not await _safe_send_json(
+                            websocket,
                             _error_payload(
                                 "invalid_image",
                                 "image_b64 is not valid base64.",
                                 frame_id=frame_id,
-                            )
-                        )
+                            ),
+                        ):
+                            break
                         continue
                 else:
-                    await websocket.send_json(
+                    if not await _safe_send_json(
+                        websocket,
                         _error_payload(
                             "unsupported_message",
                             "Empty WebSocket message received.",
-                        )
-                    )
+                        ),
+                    ):
+                        break
                     continue
 
                 if len(frame_bytes) > settings.max_frame_bytes:
-                    await websocket.send_json(
+                    if not await _safe_send_json(
+                        websocket,
                         _error_payload(
                             "frame_too_large",
                             f"Frame exceeds {settings.max_frame_bytes} bytes.",
                             frame_id=frame_id,
-                        )
-                    )
+                        ),
+                    ):
+                        break
                     continue
 
                 try:
@@ -408,15 +464,19 @@ def create_app() -> FastAPI:
                         return_image=return_image,
                     )
                 except ValueError as exc:
-                    await websocket.send_json(
-                        _error_payload("invalid_frame", str(exc), frame_id=frame_id)
-                    )
+                    if not await _safe_send_json(
+                        websocket,
+                        _error_payload("invalid_frame", str(exc), frame_id=frame_id),
+                    ):
+                        break
                     continue
                 except Exception as exc:  # pragma: no cover
                     LOGGER.exception("Inference error on session %s", session_id)
-                    await websocket.send_json(
-                        _error_payload("internal_error", str(exc), frame_id=frame_id)
-                    )
+                    if not await _safe_send_json(
+                        websocket,
+                        _error_payload("internal_error", str(exc), frame_id=frame_id),
+                    ):
+                        break
                     continue
 
                 event_update = event_manager.process_frame(
@@ -434,7 +494,8 @@ def create_app() -> FastAPI:
                     if "event" in event_update:
                         response["event"] = event_update["event"]
 
-                await websocket.send_json(response)
+                if not await _safe_send_json(websocket, response):
+                    break
 
         except WebSocketDisconnect:
             pass
