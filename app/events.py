@@ -109,6 +109,12 @@ class SessionEventRecorder:
         self._source_metadata = source_metadata
         self._model_id = model_id
         self._telegram_notifier = telegram_notifier
+        self._fill_events_enabled = (
+            model_id in settings.resolve_fill_event_model_ids()
+        )
+        self._fill_event_storage_prefix = settings.resolve_fill_event_storage_prefix(
+            model_id
+        )
         self._frame_times: deque[float] = deque(maxlen=30)
         self._active_event: ActiveEvent | None = None
         self._last_event_at = 0.0
@@ -203,7 +209,7 @@ class SessionEventRecorder:
         self,
         detections: list[dict[str, Any]],
     ) -> dict[str, Any] | None:
-        if self._model_id not in self._settings.telegram_model_ids:
+        if not self._fill_events_enabled:
             self._fill_event_active = False
             return None
 
@@ -246,7 +252,7 @@ class SessionEventRecorder:
         )
         video_caption = "\n".join(
             [
-                "VIDEO EVENTO CANA",
+                "VIDEO EVENTO LLENADO",
                 f"camara: {source_line}",
                 f"conexion: {self._connection_id}",
                 f"modelo: {self._model_id}",
@@ -676,7 +682,7 @@ class SessionEventRecorder:
             trigger_detection=trigger_detection,
             snapshot_id=snapshot.get("id"),
             storage_prefix=(
-                self._settings.fill_event_storage_prefix
+                self._fill_event_storage_prefix
                 if event_kind == "fill"
                 else self._settings.minio_prefix
             ),
@@ -701,6 +707,7 @@ class EventManager:
         self._temp_dir.mkdir(parents=True, exist_ok=True)
         self._telegram_notifier: TelegramNotifier | None = None
         if settings.telegram_enabled:
+            fill_event_model_ids = settings.resolve_fill_event_model_ids()
             masked_chat_id = (
                 settings.telegram_chat_id[-4:]
                 if len(settings.telegram_chat_id) >= 4
@@ -708,7 +715,7 @@ class EventManager:
             )
             LOGGER.info(
                 "Telegram alerts enabled: models=%s threshold=%s chat_id=***%s",
-                settings.telegram_model_ids,
+                fill_event_model_ids,
                 settings.telegram_fill_threshold,
                 masked_chat_id,
             )

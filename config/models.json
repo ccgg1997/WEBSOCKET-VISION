@@ -1,0 +1,30 @@
+{
+  "default_model_id": "default",
+  "models": [
+    {
+      "id": "default",
+      "name": "Modelo General",
+      "selector": "1",
+      "path": "runtime/model.pt",
+      "aliases": ["general"]
+    },
+    {
+      "id": "cana",
+      "name": "Modelo Cana",
+      "selector": "2",
+      "path": "runtime/cana.pt",
+      "aliases": ["llenado"],
+      "fill_events_enabled": true,
+      "fill_event_storage_prefix": "cana"
+    },
+    {
+      "id": "banda",
+      "name": "Modelo Banda",
+      "selector": "3",
+      "path": "runtime/bandaM.pt",
+      "aliases": ["transporte"],
+      "fill_events_enabled": true,
+      "fill_event_storage_prefix": "banda"
+    }
+  ]
+}

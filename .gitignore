@@ -10,3 +10,4 @@ runtime/*
 !runtime/.gitkeep
 !runtime/model.pt
 !runtime/cana.pt
+!runtime/bandaM.pt

@@ -12,4 +12,6 @@ __pycache__
 .env
 runtime/*
 !runtime/.gitkeep
-!runtime/model.pt
+!runtime/*.pt
+!runtime/models/
+!runtime/models/*.pt

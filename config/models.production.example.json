@@ -1,0 +1,20 @@
+{
+  "default_model_id": "default",
+  "models": [
+    {
+      "id": "default",
+      "name": "Modelo General",
+      "selector": "1",
+      "url": "https://storage.example.com/models/yolo26n.pt",
+      "sha256": ""
+    },
+    {
+      "id": "cana",
+      "name": "Modelo Cana",
+      "selector": "2",
+      "url": "https://storage.example.com/models/cana.pt",
+      "fill_events_enabled": true,
+      "fill_event_storage_prefix": "cana"
+    }
+  ]
+}

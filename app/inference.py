@@ -53,7 +53,8 @@ def ensure_model_file(settings: ServiceSettings, definition: ModelDefinition) ->
     if not definition.url:
         raise FileNotFoundError(
             f"No se encontro el modelo '{definition.model_id}' en {model_path}. "
-            "Define YOLO_WS_MODEL_PATH o usa YOLO_WS_MODEL_IDS con YOLO_WS_MODEL_<ID>_PATH/URL."
+            "Define YOLO_WS_MODELS_FILE, YOLO_WS_MODEL_PATH o usa YOLO_WS_MODEL_IDS con "
+            "YOLO_WS_MODEL_<ID>_PATH/URL."
         )
 
     model_path.parent.mkdir(parents=True, exist_ok=True)
@@ -132,6 +133,8 @@ class ModelRuntime:
         self.model = YOLO(str(self.model_path)).to(self.device)
         self.model_name = definition.display_name or self.model_path.name
         self.model_file_name = self.model_path.name
+        self.selector = definition.selector_raw.strip()
+        self.selection_aliases = tuple(alias for alias in definition.selection_aliases if alias)
         self._predict_lock = threading.Lock()
 
         if self.device == "cpu":
@@ -145,12 +148,14 @@ class ModelRuntime:
             self.device,
         )
 
-    def describe(self) -> dict[str, str]:
+    def describe(self) -> dict[str, Any]:
         return {
             "id": self.model_id,
             "name": self.model_name,
             "file_name": self.model_file_name,
             "device": self.device,
+            "selector": self.selector,
+            "selection_aliases": list(self.selection_aliases),
         }
 
     @staticmethod
@@ -239,10 +244,21 @@ class ModelRegistry:
     def __init__(self, settings: ServiceSettings) -> None:
         self.settings = settings
         self.default_model_id = settings.resolve_default_model_id()
+        self._selection_values = settings.resolve_model_selection_values()
+        self._selectors = {
+            model_id: settings.resolve_model_selector(model_id)
+            for model_id in settings.resolve_model_definitions()
+        }
         self._runtimes: dict[str, ModelRuntime] = {}
 
         for model_id, definition in settings.resolve_model_definitions().items():
-            self._runtimes[model_id] = ModelRuntime(settings, definition)
+            runtime = ModelRuntime(settings, definition)
+            runtime.selector = self._selectors.get(model_id, runtime.selector)
+            runtime.selection_aliases = self._selection_values.get(
+                model_id,
+                runtime.selection_aliases,
+            )
+            self._runtimes[model_id] = runtime
 
     def get(self, model_id: str | None = None) -> ModelRuntime:
         selected_id = model_id or self.default_model_id
@@ -251,5 +267,5 @@ class ModelRegistry:
             raise KeyError(selected_id)
         return runtime
 
-    def list_models(self) -> list[dict[str, str]]:
+    def list_models(self) -> list[dict[str, Any]]:
         return [runtime.describe() for runtime in self._runtimes.values()]

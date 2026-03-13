@@ -40,7 +40,7 @@ Compatibilidad actual con `vision-app`:
 
 - esa web envia `model`, `model_id`, `model_selection` y `requested_model`
 - normalmente manda `"1"` para el modelo general y `"2"` para el modelo de llenado
-- este backend ya acepta esos campos y puede mapearlos con `YOLO_WS_MODEL_SELECTION_ALIASES`
+- este backend ya acepta esos campos y asigna aliases numericos automaticamente segun el orden de los modelos
 
 ### 1. Mensaje de autenticacion
 
@@ -69,12 +69,14 @@ Antes del `auth`, el servidor manda un `hello` con los modelos disponibles:
     {
       "id": "default",
       "name": "Modelo General",
+      "selector": "1",
       "file_name": "model.pt",
       "device": "cpu"
     },
     {
       "id": "cana",
       "name": "Modelo Cana",
+      "selector": "2",
       "file_name": "cana.pt",
       "device": "cpu"
     }
@@ -208,10 +210,15 @@ Por defecto:
 - `YOLO_WS_AUTH_PASSWORD_HASH`: hash PBKDF2 recomendado.
 - `YOLO_WS_AUTH_PASSWORD`: solo para pruebas rapidas.
 - `YOLO_WS_DEFAULT_MODEL_ID`: modelo por defecto del socket.
+- `YOLO_WS_MODELS_FILE`: archivo JSON con la lista de modelos y sus opciones. Es la forma recomendada para crecer a N modelos.
+- `selector` en `YOLO_WS_MODELS_FILE`: valor recomendado para que los clientes llamen ese modelo. Puede ser `1`, `2`, `10` o el que quieras.
 - `YOLO_WS_MODEL_PATH`: ruta local al `.pt`, relativa a esta misma carpeta.
 - `YOLO_WS_MODEL_NAME`: nombre visible del modelo unico por compatibilidad.
 - `YOLO_WS_MODEL_URL`: URL para descargar el modelo si no existe en disco.
 - `YOLO_WS_MODEL_SHA256`: checksum opcional para validar la descarga.
+- `aliases` en `YOLO_WS_MODELS_FILE`: aliases opcionales por modelo. Los numericos (`1`, `2`, `3`, ...) se agregan automaticamente segun el orden.
+- `fill_events_enabled` en `YOLO_WS_MODELS_FILE`: activa la logica de llenado para ese modelo.
+- `fill_event_storage_prefix` en `YOLO_WS_MODELS_FILE`: prefijo de almacenamiento para eventos de llenado de ese modelo.
 - `YOLO_WS_MODEL_IDS`: activa modo multi-modelo, por ejemplo `default,cana`.
 - `YOLO_WS_MODEL_<ID>_PATH`: ruta local del modelo `ID`.
 - `YOLO_WS_MODEL_<ID>_URL`: URL opcional para descargar el modelo `ID`.
@@ -287,19 +294,35 @@ Ejemplo multi-modelo:
 
 ```env
 YOLO_WS_DEFAULT_MODEL_ID=default
-YOLO_WS_MODEL_IDS=default,cana
-YOLO_WS_MODEL_DEFAULT_NAME=Modelo General
-YOLO_WS_MODEL_DEFAULT_PATH=runtime/model.pt
-YOLO_WS_MODEL_CANA_NAME=Modelo Cana
-YOLO_WS_MODEL_CANA_PATH=runtime/cana.pt
-YOLO_WS_MODEL_SELECTION_ALIASES=1:default,2:cana
+YOLO_WS_MODELS_FILE=config/models.json
+```
+
+```json
+{
+  "default_model_id": "default",
+  "models": [
+    {
+      "id": "default",
+      "name": "Modelo General",
+      "selector": "1",
+      "path": "runtime/model.pt"
+    },
+    {
+      "id": "cana",
+      "name": "Modelo Cana",
+      "selector": "2",
+      "path": "runtime/cana.pt",
+      "fill_events_enabled": true,
+      "fill_event_storage_prefix": "cana"
+    }
+  ]
+}
 ```
 
 Ejemplo con alerta Telegram para `cana`:
 
 ```env
 YOLO_WS_TELEGRAM_ENABLED=true
-YOLO_WS_TELEGRAM_MODEL_IDS=cana
 YOLO_WS_TELEGRAM_FILL_THRESHOLD=50
 YOLO_WS_TELEGRAM_BOT_TOKEN=...
 YOLO_WS_TELEGRAM_CHAT_ID=...
