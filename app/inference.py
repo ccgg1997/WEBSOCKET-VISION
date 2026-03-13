@@ -135,10 +135,17 @@ class ModelRuntime:
         self.model_file_name = self.model_path.name
         self.selector = definition.selector_raw.strip()
         self.selection_aliases = tuple(alias for alias in definition.selection_aliases if alias)
+        self.use_half = self.device.startswith("cuda")
         self._predict_lock = threading.Lock()
 
         if self.device == "cpu":
             torch.set_num_threads(settings.torch_threads)
+        elif self.device.startswith("cuda"):
+            torch.backends.cudnn.benchmark = True
+            try:
+                torch.set_float32_matmul_precision("high")
+            except AttributeError:
+                pass
 
         LOGGER.info(
             "Model loaded: id=%s name=%s path=%s device=%s",
@@ -147,6 +154,7 @@ class ModelRuntime:
             self.model_path,
             self.device,
         )
+        self._warmup()
 
     def describe(self) -> dict[str, Any]:
         return {
@@ -154,6 +162,7 @@ class ModelRuntime:
             "name": self.model_name,
             "file_name": self.model_file_name,
             "device": self.device,
+            "half": self.use_half,
             "selector": self.selector,
             "selection_aliases": list(self.selection_aliases),
         }
@@ -193,15 +202,17 @@ class ModelRuntime:
 
         start = perf_counter()
         with self._predict_lock:
-            results = self.model.predict(
-                source=frame,
-                conf=self.settings.conf_threshold,
-                iou=self.settings.iou_threshold,
-                imgsz=self.settings.imgsz,
-                max_det=self.settings.max_det,
-                device=self.device,
-                verbose=False,
-            )
+            with torch.inference_mode():
+                results = self.model.predict(
+                    source=frame,
+                    conf=self.settings.conf_threshold,
+                    iou=self.settings.iou_threshold,
+                    imgsz=self.settings.imgsz,
+                    max_det=self.settings.max_det,
+                    device=self.device,
+                    half=self.use_half,
+                    verbose=False,
+                )
         latency_ms = round((perf_counter() - start) * 1000, 2)
 
         result = results[0]
@@ -238,6 +249,35 @@ class ModelRuntime:
             )
 
         return payload
+
+    def _warmup(self) -> None:
+        warmup_frame = np.zeros(
+            (self.settings.imgsz, self.settings.imgsz, 3),
+            dtype=np.uint8,
+        )
+        try:
+            with self._predict_lock:
+                with torch.inference_mode():
+                    self.model.predict(
+                        source=warmup_frame,
+                        conf=self.settings.conf_threshold,
+                        iou=self.settings.iou_threshold,
+                        imgsz=self.settings.imgsz,
+                        max_det=self.settings.max_det,
+                        device=self.device,
+                        half=self.use_half,
+                        verbose=False,
+                    )
+            if self.device.startswith("cuda") and torch.cuda.is_available():
+                torch.cuda.synchronize()
+            LOGGER.info(
+                "Model warmup complete: id=%s device=%s half=%s",
+                self.model_id,
+                self.device,
+                self.use_half,
+            )
+        except Exception as exc:  # pragma: no cover
+            LOGGER.warning("Model warmup failed for %s: %s", self.model_id, exc)
 
 
 class ModelRegistry:
